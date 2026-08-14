@@ -296,6 +296,7 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <meta http-equiv="refresh" content="<?= REFRESH ?>">
 <?php endif; ?>
 <meta name="theme-color" content="#00806a">
+<link rel="icon" href="bin.ico" sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256">
 <title><?= $dayMessage ? 'Bins out ' . e($dayMessage) : 'Bin collection' ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -359,11 +360,24 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
     flex: 0 1 auto;
   }
 
+  .bins figure { margin: 0; }
+
+  /* The bin photos were shot on white, so they sit on a light tile rather than
+     directly on the page background. Keeps the edges clean in dark mode too. */
+  .bin-tile {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    background: #e7e7e7;
+    border-radius: clamp(14px, 3vw, 26px);
+    padding: clamp(.6rem, 2.2vw, 1.4rem);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.04), 0 6px 16px rgba(0,0,0,.10);
+  }
+
   .bins img {
     display: block;
     width: clamp(110px, 26vw, 260px);
     height: auto;
-    filter: drop-shadow(0 12px 18px rgba(0,0,0,.16));
   }
 
   .bins figcaption {
@@ -480,8 +494,10 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
   <ul class="bins">
     <?php foreach ($nextBins as $bin): ?>
       <li>
-        <figure style="margin:0">
-          <img src="<?= e(IMG_DIR . '/' . BINS[$bin]) ?>" alt="<?= e($bin) ?> bin" loading="lazy">
+        <figure>
+          <span class="bin-tile">
+            <img src="<?= e(IMG_DIR . '/' . BINS[$bin]) ?>" alt="<?= e($bin) ?> bin" loading="lazy">
+          </span>
           <figcaption><?= e($bin) ?></figcaption>
         </figure>
       </li>
