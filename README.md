@@ -37,21 +37,27 @@ Upload the whole folder to your web root — `index.php`, `img/`, `favicon.ico` 
 `site.webmanifest`. Requires **PHP 7.0+**; cURL is used if available, with a
 stream-wrapper fallback if not.
 
-Set your UPRN at the top of the file:
+There's nothing to configure per household — on first visit the page asks for a
+postcode, shows the matching addresses, and remembers the chosen UPRN in a cookie
+for a year. A `change address` link in the footer starts that over.
 
 ```php
-const UPRN       = '117060380';   // find yours with angus_bins.py --postcode
-const CACHE_TTL  = 6 * 60 * 60;   // how long to trust cached data
-const TIMEZONE   = 'Europe/London';
-const REFRESH    = 3600;          // browser auto-refresh, 0 to disable
-const IMG_DIR    = 'img';
+const CACHE_TTL   = 6 * 60 * 60;   // how long to trust cached data
+const TIMEZONE    = 'Europe/London';
+const REFRESH     = 3600;          // browser auto-refresh, 0 to disable
+const IMG_DIR     = 'img';
+const COOKIE_DAYS = 365;
 ```
 
-The page writes `.binday-cache.json` next to itself, so that directory needs to be
-writable. If it isn't, everything still works — you just hit the API on every load.
+The page writes `.binday-cache-<uprn>.json` next to itself — one file per address,
+so a single deployment serves several households. That directory needs to be
+writable; if it isn't, everything still works, you just hit the API on every load.
 
 ### Behaviour
 
+- First visit asks for a postcode, then an address; the UPRN is stored in a cookie
+- Plain form posts, so it works with JavaScript disabled; the API is only ever
+  called server-side
 - Headline reads `TODAY`, `TOMORROW`, or the weekday name
 - Shows every bin due on the next collection date, then the following three dates
   as coloured chips
@@ -127,7 +133,8 @@ python angus_bins.py --postcode "DD9 7AJ" --house 7
 | `--date` | Start date as `YYYY-MM-DD` (default: today) |
 | `--json` | Emit raw JSON instead of a table |
 
-Once you know your UPRN, hardcode it — it never changes.
+Once you know your UPRN, keep it — it never changes. (The web page asks for it
+interactively instead, so this only matters for scripting.)
 
 ---
 

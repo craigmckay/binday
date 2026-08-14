@@ -10,14 +10,20 @@
 
 // ---------------------------------------------------------------- config ---
 
-const UPRN       = '117060380';          // 7 Park Grove, Brechin DD9 7AJ
-const CACHE_FILE = __DIR__ . '/.binday-cache.json';
 const CACHE_TTL  = 6 * 60 * 60;          // seconds - 6 hours
 const TIMEZONE   = 'Europe/London';
 const REFRESH    = 3600;                 // browser auto-refresh, seconds (0 = off)
 
+// The chosen address is remembered in a cookie - there's no hardcoded UPRN, so a
+// first-time visitor is asked for their postcode.
+const COOKIE_UPRN  = 'binday_uprn';
+const COOKIE_LABEL = 'binday_address';
+const COOKIE_DAYS  = 365;
+
 const HOST = 'https://myangus.angus.gov.uk';
-const LOOKUP_COLLECTIONS = '66587d491feab';
+const LOOKUP_COLLECTIONS   = '66587d491feab';   // UPRN + date -> collection dates
+const LOOKUP_ADDRESSES     = '65a5507c8d3e6';   // postcode    -> addresses + UPRN
+const LOOKUP_FORMAT_SEARCH = '686cdfffd9945';   // raw search  -> normalised search
 
 // Where the bin images live, relative to this file.
 const IMG_DIR = 'img';
@@ -190,13 +196,71 @@ function angus_collections($uprn, $fromDate)
     return $out;
 }
 
+/** Shared plumbing for a runLookup call - returns rows_data as a list. */
+function angus_lookup($lookupId, array $fields, $sid = null)
+{
+    $sid = $sid ?: angus_session();
+
+    $url = HOST . '/apibroker/runLookup?' . http_build_query([
+        'id'             => $lookupId,
+        'repeat_against' => '',
+        'noRetry'        => 'true',
+        'getOnlyTokens'  => 'undefined',
+        'log_id'         => '',
+        'app_name'       => 'AF-Renderer::Self',
+        '_'              => (string) round(microtime(true) * 1000),
+        'sid'            => $sid,
+    ]);
+
+    $body = [];
+    foreach ($fields as $k => $v) {
+        $body[$k] = ['value' => (string) $v];
+    }
+
+    $data = json_decode(http_post_json($url, ['formValues' => ['Section 3' => $body]]), true);
+    $rows = $data['integration']['transformed']['rows_data'] ?? [];
+    return is_array($rows) ? array_values($rows) : [];
+}
+
+/**
+ * Postcode or partial address -> addresses.
+ * @return array list of ['uprn' => '117060380', 'display' => '7 PARK GROVE ...']
+ */
+function angus_addresses($search)
+{
+    $sid = angus_session();
+
+    // The form normalises the search string first; mirror it for fidelity.
+    $fmt = angus_lookup(LOOKUP_FORMAT_SEARCH, ['search' => $search], $sid);
+    $normalised = $fmt[0]['formatted_search'] ?? $search;
+
+    $rows = angus_lookup(LOOKUP_ADDRESSES, ['formatted_search' => $normalised], $sid);
+
+    $out = [];
+    foreach ($rows as $row) {
+        if (empty($row['UPRN']) || empty($row['display'])) {
+            continue;
+        }
+        $out[] = ['uprn' => $row['UPRN'], 'display' => $row['display']];
+    }
+    return $out;
+}
+
 // ----------------------------------------------------------------- caching ---
+
+/** One cache file per address, so several households can share a deployment. */
+function cache_file($uprn)
+{
+    return __DIR__ . '/.binday-cache-' . preg_replace('/\D/', '', $uprn) . '.json';
+}
 
 function load_collections($uprn, $today)
 {
+    $file = cache_file($uprn);
+
     // Fresh cache for the right day? Use it.
-    if (is_readable(CACHE_FILE)) {
-        $cached = json_decode(file_get_contents(CACHE_FILE), true);
+    if (is_readable($file)) {
+        $cached = json_decode(file_get_contents($file), true);
         $fresh  = isset($cached['fetched']) && (time() - $cached['fetched']) < CACHE_TTL;
         if ($fresh && ($cached['uprn'] ?? null) === $uprn && ($cached['from'] ?? null) === $today) {
             return [$cached['collections'], true, null];
@@ -213,7 +277,7 @@ function load_collections($uprn, $today)
             throw new RuntimeException('API returned no collections for UPRN ' . $uprn);
         }
 
-        @file_put_contents(CACHE_FILE, json_encode([
+        @file_put_contents($file, json_encode([
             'fetched'     => time(),
             'uprn'        => $uprn,
             'from'        => $today,
@@ -229,12 +293,94 @@ function load_collections($uprn, $today)
     }
 }
 
-// -------------------------------------------------------------------- main ---
+// ------------------------------------------------------- address selection ---
+
+function remember($name, $value)
+{
+    $secure  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || (($_SERVER['SERVER_PORT'] ?? null) == 443);
+    $expires = time() + COOKIE_DAYS * 86400;
+    $path    = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/';
+
+    if (PHP_VERSION_ID >= 70300) {
+        setcookie($name, $value, [
+            'expires'  => $expires, 'path' => $path, 'secure' => $secure,
+            'httponly' => true,     'samesite' => 'Lax',
+        ]);
+    } else {
+        setcookie($name, $value, $expires, $path, '', $secure, true);
+    }
+}
+
+function forget($name)
+{
+    $path = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/';
+    setcookie($name, '', time() - 3600, $path);
+}
 
 date_default_timezone_set(TIMEZONE);
 $today = date('Y-m-d');
 
-list($collections, $fromCache, $error) = load_collections(UPRN, $today);
+$view        = 'bins';      // bins | ask | pick
+$addresses   = [];
+$searchTerm  = '';
+$pickError   = null;
+
+$uprn  = preg_replace('/\D/', '', $_COOKIE[COOKIE_UPRN] ?? '');
+$label = $_COOKIE[COOKIE_LABEL] ?? '';
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+
+    // Address chosen from the dropdown - save and redirect (POST/redirect/GET,
+    // so a refresh doesn't resubmit the form).
+    if (!empty($_POST['uprn'])) {
+        $chosen = preg_replace('/\D/', '', $_POST['uprn']);
+        if ($chosen !== '') {
+            remember(COOKIE_UPRN, $chosen);
+            remember(COOKIE_LABEL, substr(trim($_POST['label'] ?? ''), 0, 120));
+            header('Location: ' . strtok($_SERVER['REQUEST_URI'] ?? './', '?'), true, 303);
+            exit;
+        }
+        $pickError = 'That address didn\'t come through - try again.';
+        $view = 'ask';
+
+    // Postcode submitted - look up the matching addresses.
+    } elseif (isset($_POST['postcode'])) {
+        $searchTerm = trim(substr($_POST['postcode'], 0, 60));
+        $view = 'ask';
+        if ($searchTerm === '') {
+            $pickError = 'Enter a postcode or part of an address.';
+        } else {
+            try {
+                $addresses = angus_addresses($searchTerm);
+                if ($addresses) {
+                    $view = 'pick';
+                } else {
+                    $pickError = 'No addresses found for "' . $searchTerm . '".';
+                }
+            } catch (Exception $e) {
+                $pickError = 'Address lookup failed: ' . $e->getMessage();
+            }
+        }
+    }
+
+} elseif (isset($_GET['change'])) {
+    $view = 'ask';
+    forget(COOKIE_UPRN);
+    forget(COOKIE_LABEL);
+    $uprn = '';
+
+} elseif ($uprn === '') {
+    $view = 'ask';
+}
+
+$collections = [];
+$fromCache   = false;
+$error       = null;
+
+if ($view === 'bins') {
+    list($collections, $fromCache, $error) = load_collections($uprn, $today);
+}
 
 // Group bins by date, keep dates in order.
 $byDate = [];
@@ -292,7 +438,7 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<?php if (REFRESH > 0): ?>
+<?php if (REFRESH > 0 && $view === 'bins'): ?>
 <meta http-equiv="refresh" content="<?= REFRESH ?>">
 <?php endif; ?>
 <meta name="theme-color" content="#121815">
@@ -311,7 +457,7 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <!-- Android / Chrome -->
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="site.webmanifest">
-<title><?= $dayMessage ? 'Bins out ' . e($dayMessage) : 'Bin collection' ?></title>
+<title><?= ($view === 'bins' && $dayMessage) ? 'Bins out ' . e($dayMessage) : 'Bin collection' ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Biryani:wght@200;700;900&display=swap">
@@ -454,12 +600,77 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
   .chip-blue   { background: #0055c7; }
   .chip-brown  { background: #7a4a22; }
 
+  /* Address picker -------------------------------------------------------- */
+
+  .setup {
+    max-width: 560px;
+    margin: 0 auto;
+    background: var(--card);
+    border-radius: 16px;
+    padding: clamp(1.25rem, 4vw, 2rem);
+    box-shadow: 0 1px 3px rgba(0,0,0,.07);
+  }
+
+  .setup label {
+    display: block;
+    font-weight: 700;
+    font-size: .95rem;
+    margin-bottom: .5rem;
+  }
+
+  .setup input[type=text],
+  .setup select {
+    width: 100%;
+    font-family: inherit;
+    font-size: 1.05rem;
+    padding: .7rem .85rem;
+    border: 1px solid #c6cfca;
+    border-radius: 10px;
+    background: #fff;
+    color: #16241f;
+  }
+
+  .setup button {
+    margin-top: .9rem;
+    width: 100%;
+    font-family: inherit;
+    font-size: 1.05rem;
+    font-weight: 700;
+    padding: .75rem 1rem;
+    border: 0;
+    border-radius: 10px;
+    background: #14a12b;
+    color: #fff;
+    cursor: pointer;
+  }
+
+  .setup button:hover { background: #118924; }
+
+  .setup .hint {
+    margin: .8rem 0 0;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+
+  .setup a { color: inherit; }
+
+  .setup .error {
+    margin: 0 0 1rem;
+    padding: .7rem .9rem;
+    border-radius: 8px;
+    background: #fdecea;
+    color: #8a1c11;
+    font-size: .9rem;
+  }
+
   footer {
     margin-top: 2rem;
     text-align: center;
     font-size: .8rem;
     color: var(--muted);
   }
+
+  footer a { color: inherit; }
 
   .notice {
     max-width: 620px;
@@ -481,15 +692,55 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <body>
 <main>
 
-<?php if ($error !== null && !$collections): ?>
+<?php if ($view === 'ask'): ?>
+
+  <h1>Which <strong>address</strong>?</h1>
+  <p class="date-line">Angus Council collections. We'll remember your choice on this device.</p>
+
+  <div class="setup">
+    <?php if ($pickError !== null): ?>
+      <p class="error"><?= e($pickError) ?></p>
+    <?php endif; ?>
+    <form method="post" action="">
+      <label for="postcode">Postcode or part of an address</label>
+      <input type="text" id="postcode" name="postcode" value="<?= e($searchTerm) ?>"
+             placeholder="DD9 7AJ" autocomplete="postal-code" autofocus required>
+      <button type="submit">Find addresses</button>
+    </form>
+    <p class="hint">Stored in a cookie on this device only &mdash; nothing is sent anywhere but Angus Council.</p>
+  </div>
+
+<?php elseif ($view === 'pick'): ?>
+
+  <h1>Pick your <strong>address</strong></h1>
+  <p class="date-line"><?= count($addresses) ?> found for &ldquo;<?= e($searchTerm) ?>&rdquo;</p>
+
+  <div class="setup">
+    <form method="post" action="" id="pickform">
+      <label for="uprn">Address</label>
+      <select id="uprn" name="uprn" required
+              onchange="document.getElementById('label').value = this.options[this.selectedIndex].text">
+        <?php foreach ($addresses as $i => $a): ?>
+          <option value="<?= e($a['uprn']) ?>"><?= e($a['display']) ?></option>
+        <?php endforeach; ?>
+      </select>
+      <input type="hidden" id="label" name="label" value="<?= e($addresses[0]['display'] ?? '') ?>">
+      <button type="submit">Save this address</button>
+    </form>
+    <p class="hint"><a href="?change=1">Search a different postcode</a></p>
+  </div>
+
+<?php elseif ($error !== null && !$collections): ?>
 
   <h1>Couldn't reach the <strong>bin data</strong></h1>
   <p class="date-line"><?= e($error) ?></p>
+  <p class="date-line"><a href="?change=1">Change address</a></p>
 
 <?php elseif ($nextDate === null): ?>
 
   <h1>No collections <strong>scheduled</strong></h1>
-  <p class="date-line">Nothing returned for UPRN <?= e(UPRN) ?>.</p>
+  <p class="date-line">Nothing returned for <?= $label !== '' ? e($label) : 'UPRN ' . e($uprn) ?>.</p>
+  <p class="date-line"><a href="?change=1">Change address</a></p>
 
 <?php else: ?>
 
@@ -539,6 +790,9 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <?php endif; ?>
 
   <footer>
+    <?php if ($view === 'bins'): ?>
+      <?= $label !== '' ? e($label) . ' &middot; ' : '' ?><a href="?change=1">change address</a><br>
+    <?php endif; ?>
     Data from Angus Council<?= $fromCache ? ' &middot; cached' : '' ?>
   </footer>
 </main>

@@ -1,5 +1,5 @@
 # Live API response cache
-.binday-cache.json
+.binday-cache-*.json
 
 __pycache__/
 *.pyc
