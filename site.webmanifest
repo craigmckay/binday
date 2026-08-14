@@ -1,0 +1,16 @@
+{
+  "name": "Bin Day",
+  "short_name": "Bin Day",
+  "description": "Next Angus Council bin collection",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#121815",
+  "background_color": "#121815",
+  "icons": [
+    { "src": "img/ico/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "img/ico/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "img/ico/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

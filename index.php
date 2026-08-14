@@ -295,8 +295,22 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 <?php if (REFRESH > 0): ?>
 <meta http-equiv="refresh" content="<?= REFRESH ?>">
 <?php endif; ?>
-<meta name="theme-color" content="#00806a">
-<link rel="icon" href="bin.ico" sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256">
+<meta name="theme-color" content="#121815">
+
+<!-- Desktop browsers -->
+<link rel="icon" href="favicon.ico" sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256">
+<link rel="icon" type="image/png" sizes="192x192" href="<?= IMG_DIR ?>/ico/icon-192.png">
+
+<!-- iOS home screen. Safari ignores .ico here and won't render transparency,
+     so this is an opaque PNG; iOS rounds the corners itself. -->
+<link rel="apple-touch-icon" sizes="180x180" href="<?= IMG_DIR ?>/ico/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Bin Day">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+<!-- Android / Chrome -->
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="site.webmanifest">
 <title><?= $dayMessage ? 'Bins out ' . e($dayMessage) : 'Bin collection' ?></title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
