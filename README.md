@@ -16,7 +16,11 @@ No account, API key, or authentication is required. The session token endpoint i
 |---|---|
 | `index.php` | Responsive web page showing the next collection and its bin colours |
 | `angus_bins.py` | Command-line client for looking up addresses and dates |
-| `img/bin_*.png` | Bin images — grey, green, purple, blue, brown |
+| `img/bin_*.png` | Bin photos — grey, green, purple, blue, brown |
+| `img/bin.png` | Source artwork the icons are generated from |
+| `img/ico/` | Home-screen and app icons |
+| `favicon.ico` | Browser tab icon, 16–256px |
+| `site.webmanifest` | Lets the page install as a standalone app |
 
 ---
 
@@ -29,8 +33,9 @@ from the API and caches to a JSON file — no database, no cron job.
 
 ### Deploy
 
-Upload `index.php` and the `img/` folder to your web root. Requires **PHP 7.0+**;
-cURL is used if available, with a stream-wrapper fallback if not.
+Upload the whole folder to your web root — `index.php`, `img/`, `favicon.ico` and
+`site.webmanifest`. Requires **PHP 7.0+**; cURL is used if available, with a
+stream-wrapper fallback if not.
 
 Set your UPRN at the top of the file:
 
@@ -53,6 +58,25 @@ writable. If it isn't, everything still works — you just hit the API on every 
 - Falls back to stale cache if Angus is unreachable, rather than showing an empty page
 - Empty API responses are never cached, so a bad response can't wedge the page
 - Fluid type and image sizing via `clamp()`; respects `prefers-color-scheme: dark`
+- Bin photos sit on light grey tiles — they were shot on white, so this hides the
+  antialiased edges instead of retouching the images
+
+### Add to your home screen
+
+`site.webmanifest` and the icons in `img/ico/` make it installable, so it opens
+full-screen without browser chrome.
+
+- **iOS** — Safari → Share → *Add to Home Screen*
+- **Android** — Chrome → menu → *Install app*
+
+Regenerate the icons from a new `img/bin.png` (512×512, transparent) if you want a
+different look. iOS ignores `favicon.ico` and won't render transparency, so
+`apple-touch-icon.png` has to be an opaque PNG; iOS rounds the corners itself.
+`icon-512-maskable.png` deliberately carries extra margin because Android crops
+icons to a circle or squircle.
+
+> iOS caches home-screen icons hard. After changing them, delete the shortcut,
+> quit Safari, then re-add — otherwise you'll keep seeing the old one.
 
 ---
 
