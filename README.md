@@ -15,6 +15,8 @@ No account, API key, or authentication is required. The session token endpoint i
 | File | What it does |
 |---|---|
 | `index.php` | Responsive web page showing the next collection and its bin colours |
+| `notify.php` | Cron job that pushes a reminder to [ntfy](https://ntfy.sh) |
+| `angus.php` | Shared API client used by both PHP entry points |
 | `angus_bins.py` | Command-line client for looking up addresses and dates |
 | `img/bin_*.png` | Bin photos — grey, green, purple, blue, brown |
 | `img/bin.png` | Source artwork the icons are generated from |
@@ -83,6 +85,61 @@ icons to a circle or squircle.
 
 > iOS caches home-screen icons hard. After changing them, delete the shortcut,
 > quit Safari, then re-add — otherwise you'll keep seeing the old one.
+
+---
+
+# Reminders (cron + ntfy)
+
+`notify.php` pushes a reminder to an [ntfy](https://ntfy.sh) topic. Install the ntfy
+app, subscribe to your topic, and you get a phone notification the evening before
+and again on the morning.
+
+It's silent unless there's a collection on the target day, so most days it sends
+nothing at all.
+
+```bash
+php notify.php --uprn=117060380 --topic=angus-bins-dd97aj --dry-run
+```
+
+```
+POST https://ntfy.sh/angus-bins-dd97aj
+Title: Bin Reminder
+Priority: default
+Bins out tomorrow: 🟩 Green & 🟪 Purple
+```
+
+### Cron
+
+```cron
+# 8pm - heads up for tomorrow
+0 20 * * * /usr/local/bin/php /home/USER/public_html/binday/notify.php \
+             --uprn=117060380 --topic=angus-bins-dd97aj --quiet
+
+# 6am - reminder on the day itself
+0 6 * * *  /usr/local/bin/php /home/USER/public_html/binday/notify.php \
+             --uprn=117060380 --topic=angus-bins-dd97aj --when=today --quiet
+```
+
+`--quiet` stops cron emailing you on the days it has nothing to say. Check the PHP
+binary path in cPanel — it's often `/usr/local/bin/php` or `/opt/cpanel/ea-php82/root/usr/bin/php`.
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--uprn=N` | Property UPRN |
+| `--topic=NAME` | ntfy topic |
+| `--url=URL` | Full ntfy URL instead of `--topic`, for self-hosted ntfy |
+| `--when=today` | Target today rather than tomorrow |
+| `--dry-run` | Print the message instead of sending it |
+| `--quiet` | Say nothing when there's nothing due |
+
+> **ntfy topics are public.** Anyone who guesses the topic name can read your bin
+> days and post to it. Use something unguessable, or self-host with auth.
+
+If your host's cron can only fetch a URL rather than run PHP directly, set
+`NOTIFY_TOKEN` in `notify.php` to a long random string and call
+`notify.php?token=THAT_STRING`. Left empty, web requests return 404.
 
 ---
 

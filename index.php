@@ -2,17 +2,17 @@
 /**
  * binday - next Angus Council bin collection.
  *
- * Reads live from the MyAngus API (no database), caching the result to a local
- * JSON file so the council's server only gets hit a few times a day.
+ * Asks for a postcode on first visit, remembers the chosen address in a cookie,
+ * then shows the next collection. API plumbing lives in angus.php.
  *
- * Drop this on a cPanel host alongside the bin_*.png files. Needs PHP 7.0+.
+ * Drop this on a cPanel host alongside angus.php and the img/ folder. PHP 7.0+.
  */
+
+require __DIR__ . '/angus.php';
 
 // ---------------------------------------------------------------- config ---
 
-const CACHE_TTL  = 6 * 60 * 60;          // seconds - 6 hours
-const TIMEZONE   = 'Europe/London';
-const REFRESH    = 3600;                 // browser auto-refresh, seconds (0 = off)
+const REFRESH = 3600;                    // browser auto-refresh, seconds (0 = off)
 
 // The chosen address is remembered in a cookie - there's no hardcoded UPRN, so a
 // first-time visitor is asked for their postcode.
@@ -20,278 +20,17 @@ const COOKIE_UPRN  = 'binday_uprn';
 const COOKIE_LABEL = 'binday_address';
 const COOKIE_DAYS  = 365;
 
-const HOST = 'https://myangus.angus.gov.uk';
-const LOOKUP_COLLECTIONS   = '66587d491feab';   // UPRN + date -> collection dates
-const LOOKUP_ADDRESSES     = '65a5507c8d3e6';   // postcode    -> addresses + UPRN
-const LOOKUP_FORMAT_SEARCH = '686cdfffd9945';   // raw search  -> normalised search
-
 // Where the bin images live, relative to this file.
 const IMG_DIR = 'img';
 
-// Display order + image for each bin stream the API can return.
-const BINS = [
+// Image for each bin stream. Display order comes from BIN_ORDER in angus.php.
+const BIN_IMAGES = [
     'Grey'   => 'bin_grey.png',
     'Green'  => 'bin_green.png',
     'Purple' => 'bin_purple.png',
     'Blue'   => 'bin_blue.png',
     'Brown'  => 'bin_brown.png',
 ];
-
-// ------------------------------------------------------------ http helper ---
-//
-// IMPORTANT: the API hands out a session cookie on the auth call and *requires*
-// it back on the lookup. Passing the sid query parameter alone returns HTTP 200
-// with an empty result set - which looks like "no collections" rather than an
-// error. So every request below shares one cookie jar.
-
-const USER_AGENT = 'Mozilla/5.0 (compatible; binday/1.0)';
-
-function cookie_jar()
-{
-    static $jar = null;
-    if ($jar === null) {
-        $jar = tempnam(sys_get_temp_dir(), 'binday_');
-        register_shutdown_function(function () use ($jar) { @unlink($jar); });
-    }
-    return $jar;
-}
-
-/** Cookies captured from the stream-wrapper fallback path. */
-function stream_cookies($set = null)
-{
-    static $cookies = '';
-    if ($set !== null) {
-        $cookies = $set;
-    }
-    return $cookies;
-}
-
-function http_request($url, array $body = null)
-{
-    $isPost  = $body !== null;
-    $payload = $isPost ? json_encode($body) : null;
-
-    if (function_exists('curl_init')) {
-        $ch   = curl_init($url);
-        $opts = [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 20,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_USERAGENT      => USER_AGENT,
-            CURLOPT_COOKIEJAR      => cookie_jar(),   // save cookies
-            CURLOPT_COOKIEFILE     => cookie_jar(),   // and send them back
-        ];
-        if ($isPost) {
-            $opts[CURLOPT_POST]       = true;
-            $opts[CURLOPT_POSTFIELDS] = $payload;
-            $opts[CURLOPT_HTTPHEADER] = [
-                'Content-Type: application/json',
-                'X-Requested-With: XMLHttpRequest',
-                'Referer: ' . HOST . '/AchieveForms/',
-            ];
-        }
-        curl_setopt_array($ch, $opts);
-        $out = curl_exec($ch);
-        $err = curl_error($ch);
-        curl_close($ch);
-        if ($out === false) {
-            throw new RuntimeException('curl: ' . $err);
-        }
-        return $out;
-    }
-
-    // Fallback: no cURL. Track cookies by hand.
-    $headers = "User-Agent: " . USER_AGENT . "\r\n";
-    if (stream_cookies() !== '') {
-        $headers .= "Cookie: " . stream_cookies() . "\r\n";
-    }
-    $http = ['timeout' => 20, 'ignore_errors' => true, 'header' => $headers];
-    if ($isPost) {
-        $http['method']   = 'POST';
-        $http['content']  = $payload;
-        $http['header']  .= "Content-Type: application/json\r\n"
-                          . "X-Requested-With: XMLHttpRequest\r\n"
-                          . "Referer: " . HOST . "/AchieveForms/\r\n";
-    }
-
-    $out = @file_get_contents($url, false, stream_context_create(['http' => $http]));
-    if ($out === false) {
-        throw new RuntimeException('request failed');
-    }
-
-    // Harvest Set-Cookie from the response for the next call.
-    if (isset($http_response_header)) {
-        $jar = stream_cookies() !== '' ? explode('; ', stream_cookies()) : [];
-        foreach ($http_response_header as $h) {
-            if (stripos($h, 'Set-Cookie:') === 0) {
-                $pair = trim(explode(';', substr($h, 11))[0]);
-                if ($pair !== '') {
-                    $jar[] = $pair;
-                }
-            }
-        }
-        stream_cookies(implode('; ', array_unique($jar)));
-    }
-
-    return $out;
-}
-
-function http_get($url)            { return http_request($url); }
-function http_post_json($url, $b)  { return http_request($url, $b); }
-
-// -------------------------------------------------------------- angus api ---
-
-function angus_session()
-{
-    $url = HOST . '/authapi/isauthenticated?' . http_build_query([
-        'uri'             => HOST . '/AchieveForms/',
-        'hostname'        => 'myangus.angus.gov.uk',
-        'withCredentials' => 'true',
-    ]);
-    $data = json_decode(http_get($url), true);
-    if (empty($data['auth-session'])) {
-        throw new RuntimeException('no session token returned');
-    }
-    return $data['auth-session'];
-}
-
-/** @return array list of ['date' => 'Y-m-d', 'bin' => 'Green', 'frequency' => '...'] */
-function angus_collections($uprn, $fromDate)
-{
-    $sid = angus_session();
-
-    $url = HOST . '/apibroker/runLookup?' . http_build_query([
-        'id'            => LOOKUP_COLLECTIONS,
-        'repeat_against'=> '',
-        'noRetry'       => 'true',
-        'getOnlyTokens' => 'undefined',
-        'log_id'        => '',
-        'app_name'      => 'AF-Renderer::Self',
-        '_'             => (string) round(microtime(true) * 1000),
-        'sid'           => $sid,
-    ]);
-
-    $raw = http_post_json($url, ['formValues' => ['Section 3' => [
-        'serviceUPRN' => ['value' => (string) $uprn],
-        'currentDate' => ['value' => $fromDate],
-    ]]]);
-
-    $data = json_decode($raw, true);
-    $rows = $data['integration']['transformed']['rows_data'] ?? [];
-    if (!is_array($rows)) {
-        $rows = [];
-    }
-
-    $out = [];
-    foreach ($rows as $row) {
-        if (empty($row['binDate']) || empty($row['binTypeList'])) {
-            continue;
-        }
-        $out[] = [
-            'date'      => $row['binDate'],
-            'bin'       => $row['binTypeList'],
-            'frequency' => trim($row['binCollected'] ?? ''),
-        ];
-    }
-    return $out;
-}
-
-/** Shared plumbing for a runLookup call - returns rows_data as a list. */
-function angus_lookup($lookupId, array $fields, $sid = null)
-{
-    $sid = $sid ?: angus_session();
-
-    $url = HOST . '/apibroker/runLookup?' . http_build_query([
-        'id'             => $lookupId,
-        'repeat_against' => '',
-        'noRetry'        => 'true',
-        'getOnlyTokens'  => 'undefined',
-        'log_id'         => '',
-        'app_name'       => 'AF-Renderer::Self',
-        '_'              => (string) round(microtime(true) * 1000),
-        'sid'            => $sid,
-    ]);
-
-    $body = [];
-    foreach ($fields as $k => $v) {
-        $body[$k] = ['value' => (string) $v];
-    }
-
-    $data = json_decode(http_post_json($url, ['formValues' => ['Section 3' => $body]]), true);
-    $rows = $data['integration']['transformed']['rows_data'] ?? [];
-    return is_array($rows) ? array_values($rows) : [];
-}
-
-/**
- * Postcode or partial address -> addresses.
- * @return array list of ['uprn' => '117060380', 'display' => '7 PARK GROVE ...']
- */
-function angus_addresses($search)
-{
-    $sid = angus_session();
-
-    // The form normalises the search string first; mirror it for fidelity.
-    $fmt = angus_lookup(LOOKUP_FORMAT_SEARCH, ['search' => $search], $sid);
-    $normalised = $fmt[0]['formatted_search'] ?? $search;
-
-    $rows = angus_lookup(LOOKUP_ADDRESSES, ['formatted_search' => $normalised], $sid);
-
-    $out = [];
-    foreach ($rows as $row) {
-        if (empty($row['UPRN']) || empty($row['display'])) {
-            continue;
-        }
-        $out[] = ['uprn' => $row['UPRN'], 'display' => $row['display']];
-    }
-    return $out;
-}
-
-// ----------------------------------------------------------------- caching ---
-
-/** One cache file per address, so several households can share a deployment. */
-function cache_file($uprn)
-{
-    return __DIR__ . '/.binday-cache-' . preg_replace('/\D/', '', $uprn) . '.json';
-}
-
-function load_collections($uprn, $today)
-{
-    $file = cache_file($uprn);
-
-    // Fresh cache for the right day? Use it.
-    if (is_readable($file)) {
-        $cached = json_decode(file_get_contents($file), true);
-        $fresh  = isset($cached['fetched']) && (time() - $cached['fetched']) < CACHE_TTL;
-        if ($fresh && ($cached['uprn'] ?? null) === $uprn && ($cached['from'] ?? null) === $today) {
-            return [$cached['collections'], true, null];
-        }
-    }
-
-    try {
-        $collections = angus_collections($uprn, $today);
-
-        // An empty result means something went wrong upstream (bad UPRN, missing
-        // session cookie, API change) - never cache it, or the page shows
-        // "no collections" for the next six hours.
-        if (!$collections) {
-            throw new RuntimeException('API returned no collections for UPRN ' . $uprn);
-        }
-
-        @file_put_contents($file, json_encode([
-            'fetched'     => time(),
-            'uprn'        => $uprn,
-            'from'        => $today,
-            'collections' => $collections,
-        ]), LOCK_EX);
-        return [$collections, false, null];
-    } catch (Exception $e) {
-        // API down - fall back to a stale cache rather than showing nothing.
-        if (isset($cached['collections'])) {
-            return [$cached['collections'], true, $e->getMessage()];
-        }
-        return [[], false, $e->getMessage()];
-    }
-}
 
 // ------------------------------------------------------- address selection ---
 
@@ -318,7 +57,6 @@ function forget($name)
     setcookie($name, '', time() - 3600, $path);
 }
 
-date_default_timezone_set(TIMEZONE);
 $today = date('Y-m-d');
 
 $view        = 'bins';      // bins | ask | pick
@@ -401,7 +139,7 @@ foreach ($byDate as $date => $bins) {
 }
 
 // Order bins consistently and drop anything we've no image for.
-$nextBins = array_values(array_filter(array_keys(BINS), function ($b) use ($nextBins) {
+$nextBins = array_values(array_filter(BIN_ORDER, function ($b) use ($nextBins) {
     return in_array($b, $nextBins, true);
 }));
 
@@ -423,7 +161,7 @@ if ($nextDate !== null) {
 $upcoming = [];
 foreach ($byDate as $date => $bins) {
     if ($nextDate !== null && $date > $nextDate) {
-        $ordered = array_values(array_filter(array_keys(BINS), function ($b) use ($bins) {
+        $ordered = array_values(array_filter(BIN_ORDER, function ($b) use ($bins) {
             return in_array($b, $bins, true);
         }));
         $upcoming[] = ['date' => $date, 'bins' => $ordered];
@@ -761,7 +499,7 @@ function e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
       <li>
         <figure>
           <span class="bin-tile">
-            <img src="<?= e(IMG_DIR . '/' . BINS[$bin]) ?>" alt="<?= e($bin) ?> bin" loading="lazy">
+            <img src="<?= e(IMG_DIR . '/' . BIN_IMAGES[$bin]) ?>" alt="<?= e($bin) ?> bin" loading="lazy">
           </span>
           <figcaption><?= e($bin) ?></figcaption>
         </figure>
